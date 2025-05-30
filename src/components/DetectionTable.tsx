@@ -253,7 +253,7 @@ export default function DetectionAnalysis({ url, title, description }: Detection
   return (
     <div className="space-y-6">
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-2">
+        <TabsList className="grid grid-cols-2 bg-transparent">
           <TabsTrigger value="code" className="flex items-center gap-2">
             <Code className="w-4 h-4" />
             GitHub Repositories

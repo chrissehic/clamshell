@@ -45,10 +45,12 @@ const CC_INDEX_URLS: { [key: string]: string } = {
   "CC-MAIN-2024-51": "https://index.commoncrawl.org/CC-MAIN-2024-51-index",
   "CC-MAIN-2024-46": "https://index.commoncrawl.org/CC-MAIN-2024-46-index",
   "CC-MAIN-2024-42": "https://index.commoncrawl.org/CC-MAIN-2024-42-index",
+  "CC-MAIN-2024-26": "https://index.commoncrawl.org/CC-MAIN-2024-26-index",
 }
 
 const USE_COMMON_CRAWL_API = false; // toggle this to true/false
 const USE_WAYBACK_MACHINE_API = false; // toggle this to true/false
+const USE_GITHUB_API = false; // toggle this to true/false
 
 const userAgent = "PearlTracker/1.0";
 
@@ -216,6 +218,24 @@ interface GithubRepo {
   stargazers_count: number;
   forks_count: number;
   language: string;
+  similarity_score?: number;
+  detection_type?: string;
+  reference_location?: 'repo_metadata' | 'code_file';
+  match_context?: string;
+  code_match?: {
+    path: string;
+    html_url: string;
+  };
+}
+
+interface GithubCodeSearchItem {
+  repository: {
+    full_name: string;
+    html_url: string;
+    url: string;
+  };
+  path: string;
+  html_url: string;
 }
 
 interface GithubFile {
@@ -224,19 +244,14 @@ interface GithubFile {
   html_url: string;
 }
 
-async function detectGithubRepos(url: string, title?: string, description?: string): Promise<AIModelDetection[]> {
-  try {
-    const encodedUrl = encodeURIComponent(url);
-    const apiUrl = `https://api.github.com/search/repositories?q=${encodedUrl}`;
-    
-    if (!process.env.GITHUB_TOKEN) {
-      console.error('GitHub token not found in environment variables');
-      return [];
-    }
+// Helper function to fetch all pages from GitHub API
+async function fetchAllPages<T>(url: string, token: string, perPage = 100): Promise<T[]> {
+  let page = 1;
+  let allItems: T[] = [];
+  let hasMore = true;
 
-    const token = process.env.GITHUB_TOKEN;
-
-    const response = await fetch(apiUrl, {
+  while (hasMore) {
+    const response = await fetch(`${url}${url.includes('?') ? '&' : '?'}per_page=${perPage}&page=${page}`, {
       headers: {
         'Accept': 'application/vnd.github.v3+json',
         'User-Agent': 'PearlTracker/1.0',
@@ -245,16 +260,248 @@ async function detectGithubRepos(url: string, title?: string, description?: stri
     });
 
     if (!response.ok) {
-      console.warn(`GitHub API returned status: ${response.status}`);
-      return [];
+      console.warn(`GitHub API returned status ${response.status} for page ${page}`);
+      break;
     }
 
     const data = await response.json();
-    console.log(`Found ${data.items?.length || 0} repositories mentioning the URL`);
+    const items = data.items || [];
+    
+    allItems = [...allItems, ...items];
+    
+    // Check if we've reached the last page
+    if (items.length < perPage) {
+      hasMore = false;
+    } else {
+      page++;
+      // Be nice to GitHub's API
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
 
-    if (!data.items || data.items.length === 0) {
+  return allItems;
+}
+
+function generateUrlVariations(url: string): string[] {
+  try {
+    // Normalize the URL to ensure consistency
+    const normalizedUrl = url.trim().toLowerCase();
+
+    // Parse the URL into components
+    const urlObject = new URL(normalizedUrl);
+
+    // Extract components
+    const hostname = urlObject.hostname.replace(/^www\./, '');
+    const pathname = urlObject.pathname;
+
+    // Generate variations
+    const variations = new Set<string>();
+
+    // Original URL
+    variations.add(url);
+
+    // Without protocol
+    variations.add(`${hostname}${pathname}`);
+
+    // Without protocol and path
+    variations.add(hostname);
+
+    // // Without TLD
+    // const withoutTld = hostname.replace(/\.[^.]+$/, '');
+    // variations.add(withoutTld);
+
+    // Return variations as an array
+    return Array.from(variations);
+  } catch (error) {
+    console.error('Error generating URL variations:', error);
+    return [url];
+  }
+}
+
+
+async function searchGithubWithVariation(variation: string, isCodeSearch: boolean, token: string): Promise<GithubRepo[] | GithubCodeSearchItem[]> {
+  const encodedVariation = encodeURIComponent(`"${variation}"`);
+  const apiUrl = isCodeSearch 
+    ? `https://api.github.com/search/code?q=${encodedVariation}`
+    : `https://api.github.com/search/repositories?q=${encodedVariation}`;
+    
+  try {
+    return await fetchAllPages(
+      apiUrl,
+      token,
+      100
+    ) as GithubRepo[] | GithubCodeSearchItem[];
+  } catch (error) {
+    console.error(`Error searching GitHub for variation "${variation}":`, error);
+    return [];
+  }
+}
+
+async function detectGithubRepos(url: string): Promise<AIModelDetection[]> {
+  try {
+    if (!process.env.GITHUB_TOKEN) {
+      console.error('GitHub token not found in environment variables');
       return [];
     }
+
+    const token = process.env.GITHUB_TOKEN;
+    const urlVariations = generateUrlVariations(url);
+    console.log('Searching for URL variations:', urlVariations);
+    
+    // Search for all variations in parallel
+    const searchPromises = [];
+    
+    // Search for repositories with each variation
+    for (const variation of urlVariations) {
+      searchPromises.push(searchGithubWithVariation(variation, false, token));
+    }
+    
+    // Search for code with each variation
+    for (const variation of urlVariations) {
+      searchPromises.push(searchGithubWithVariation(variation, true, token));
+    }
+    
+    // Wait for all searches to complete
+    const allResults = await Promise.all(searchPromises);
+    
+    // Split results back into repo and code searches
+    const midPoint = urlVariations.length;
+    const allRepoItems = allResults.slice(0, midPoint).flat() as GithubRepo[];
+    const allCodeItems = allResults.slice(midPoint).flat() as GithubCodeSearchItem[];
+    
+    // Process all repository and code search results
+    const repoItems = allRepoItems;
+    const codeItems = allCodeItems;
+
+    console.log(`Found ${repoItems.length} repository matches`);
+    console.log(`Found ${codeItems.length} code references to the URL`);
+    
+    // Process code search results FIRST to prioritize them
+    const uniqueCodeRepos = new Map<string, GithubRepo>();
+    
+    if (codeItems.length > 0) {
+      codeItems.forEach((item: GithubCodeSearchItem) => {
+        if (item.repository && !uniqueCodeRepos.has(item.repository.full_name)) {
+          const codeRepo: GithubRepo = {
+            full_name: item.repository.full_name,
+            html_url: item.repository.html_url,
+            url: item.repository.url,
+            stargazers_count: 0,
+            forks_count: 0,
+            language: '',
+            detection_type: 'url_mention',
+            reference_location: 'code_file', // Mark as code file reference
+            similarity_score: 0.7, // Higher score for code references
+            match_context: `Found in ${item.path}`,
+            code_match: {
+              path: item.path,
+              html_url: item.html_url
+            }
+          };
+          uniqueCodeRepos.set(item.repository.full_name, codeRepo);
+        }
+      });
+    }
+    
+    const codeRepos = Array.from(uniqueCodeRepos.values());
+    console.log(`Found ${codeRepos.length} unique repositories with code matches`);
+
+    // Define a type for the raw repository data from GitHub API
+    interface RawGithubRepo {
+      full_name: string;
+      html_url: string;
+      url: string;
+      stargazers_count?: number;
+      forks_count?: number;
+      language?: string | null;
+    }
+
+    // Process repository search results
+    const processedRepoItems = repoItems.map((repo: RawGithubRepo) => ({
+      full_name: repo.full_name,
+      html_url: repo.html_url,
+      url: repo.url,
+      stargazers_count: repo.stargazers_count || 0,
+      forks_count: repo.forks_count || 0,
+      language: repo.language || '',
+      detection_type: 'url_mention' as const,
+      reference_location: 'repo_metadata' as const,
+      similarity_score: 0.4, // Lower score for metadata references
+      match_context: 'Found in repository metadata'
+    } as GithubRepo));
+    
+    console.log(`Processed ${processedRepoItems.length} repository items`);
+
+    // Combine results, PRIORITIZING CODE REFERENCES
+    const allRepos = new Map<string, GithubRepo>();
+    
+    // Add code search results FIRST to ensure they get priority
+    codeRepos.forEach(repo => {
+      allRepos.set(repo.full_name, repo);
+    });
+    
+    // Add repository search results, but don't overwrite code references
+    processedRepoItems.forEach(repo => {
+      if (!allRepos.has(repo.full_name)) {
+        // Only add if we don't already have this repo from code search
+        allRepos.set(repo.full_name, {
+          full_name: repo.full_name,
+          html_url: repo.html_url,
+          url: repo.url,
+          stargazers_count: repo.stargazers_count || 0,
+          forks_count: repo.forks_count || 0,
+          language: repo.language || '',
+          detection_type: 'url_mention' as const,
+          reference_location: 'repo_metadata' as const,
+          similarity_score: 0.4, // Lower score for metadata references
+          match_context: 'Found in repository metadata'
+        } as GithubRepo);
+      } else {
+        // If we already have this repo from code search, just update metadata fields
+        const existingRepo = allRepos.get(repo.full_name)!;
+        existingRepo.stargazers_count = repo.stargazers_count || existingRepo.stargazers_count;
+        existingRepo.forks_count = repo.forks_count || existingRepo.forks_count;
+        existingRepo.language = repo.language || existingRepo.language;
+      }
+    });
+    
+    // Convert combined results to array and sort them
+    // Priority order: code references first, then HTML content matches, then metadata references
+    const combinedItems = Array.from(allRepos.values());
+    
+    if (combinedItems.length === 0) {
+      return [];
+    }
+    
+    // Sort repositories: code references first, then by similarity score
+    const sortedItems = combinedItems.sort((a, b) => {
+      // First priority: code references
+      if (a.reference_location === 'code_file' && b.reference_location !== 'code_file') {
+        return -1;
+      }
+      if (a.reference_location !== 'code_file' && b.reference_location === 'code_file') {
+        return 1;
+      }
+      
+      // Second priority: HTML content matches
+      if (a.detection_type === 'html_content' && b.detection_type !== 'html_content') {
+        return -1;
+      }
+      if (a.detection_type !== 'html_content' && b.detection_type === 'html_content') {
+        return 1;
+      }
+      
+      // Third priority: similarity score (higher first)
+      if (a.similarity_score !== b.similarity_score) {
+        return (b.similarity_score || 0) - (a.similarity_score || 0);
+      }
+      
+      // Fourth priority: stars count (higher first)
+      return b.stargazers_count - a.stargazers_count;
+    });
+    
+    // Continue with the sorted results
+    const data = { items: sortedItems };
 
     // Fetch HTML content of the URL to check for content matches
     let htmlContent = "";
@@ -276,7 +523,7 @@ async function detectGithubRepos(url: string, title?: string, description?: stri
 
     // Get details for each repository
     const repositories = await Promise.all(
-      data.items.slice(0, 10).map(async (repo: GithubRepo) => {
+      data.items.slice(0, 30).map(async (repo: GithubRepo) => {
         // Fetch repository details
         const repoResponse = await fetch(repo.url, {
           headers: {
@@ -304,10 +551,18 @@ async function detectGithubRepos(url: string, title?: string, description?: stri
 
         const files = filesResponse.ok ? await filesResponse.json() : [];
         
-        // Check for content matches in the repository
-        let detectionType = 'url_mention';
+        // Determine detection type and score based on available information
+        let detectionType = 'url_mention'; // Default type
+        let referenceLocation = 'repo_metadata'; // Default location
         let matchContext = '';
         let similarityScore = 0.4; // Default score for URL mentions
+        
+        // If this repo has a code match from code search
+        if (repo.code_match) {
+          referenceLocation = 'code_file';
+          matchContext = `Found in ${repo.code_match.path}`;
+          similarityScore = 0.6; // Higher score for code file references
+        }
 
         // If we have HTML content, check for content matches
         if (htmlContent && files.length > 0) {
@@ -388,6 +643,7 @@ async function detectGithubRepos(url: string, title?: string, description?: stri
           html_url: repoDetails.html_url,
           similarity_score: similarityScore,
           detection_type: detectionType,
+          reference_location: referenceLocation,
           match_context: matchContext,
           file_links: files
             .filter((file: GithubFile) => file.type === 'file' && file.size < 100000) // Filter to reasonable file sizes
@@ -395,6 +651,7 @@ async function detectGithubRepos(url: string, title?: string, description?: stri
           stargazers_count: repoDetails.stargazers_count,
           forks_count: repoDetails.forks_count,
           language: repoDetails.language,
+          code_match: repo.code_match
         } as RepositoryDetails;
       })
     );
@@ -427,6 +684,10 @@ async function runDetection(url: string, source: string, year?: string, title?: 
   }
   if (source === "wayback-machine" && !USE_WAYBACK_MACHINE_API) {
     console.log("Wayback Machine API is currently disabled.");
+    return [];
+  }
+  if (source === "github-repos" && !USE_GITHUB_API) {
+    console.log("Github API is currently disabled.");
     return [];
   }
 

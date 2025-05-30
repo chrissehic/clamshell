@@ -79,7 +79,7 @@ export default function PearlPage() {
         <Link href="/dashboard" className="flex flex-1">
           <Button variant="ghost" className="mb-6">
             <ArrowLeft className="size-6 mr-2" />
-            Back to Dashboard
+            Back to Search
           </Button>
         </Link>
 

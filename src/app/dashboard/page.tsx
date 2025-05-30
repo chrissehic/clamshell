@@ -260,12 +260,13 @@ export default function Dashboard() {
         <div className="max-w-3xl w-full flex flex-col gap-2">
           <div className="w-full relative">
             <Input
-              type="search"
+              type="url"
               className="rounded-full px-6 py-4"
               placeholder="Enter website URL"
               value={urlInput}
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
+              autoComplete="url"
             />
             {hasContent && (
               <Button

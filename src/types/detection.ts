@@ -3,11 +3,16 @@ export interface RepositoryDetails {
   html_url: string
   similarity_score?: number
   detection_type: 'url_mention' | 'html_content'
+  reference_location?: 'repo_metadata' | 'code_file'
   match_context?: string
   file_links: string[]
   stargazers_count: number
   forks_count: number
   language: string
+  code_match?: {
+    path: string
+    html_url: string
+  }
 }
 
 export interface AIModelDetection {
